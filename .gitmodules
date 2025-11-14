@@ -1,0 +1,9 @@
+[submodule "rateatlas-ingest"]
+	path = rateatlas-ingest
+	url = https://github.com/CHA0sTIG3R/rateatlas-ingest.git
+[submodule "rateatlas-api"]
+	path = rateatlas-api
+	url = https://github.com/CHA0sTIG3R/rateatlas-api.git
+[submodule "rateatlas-frontend"]
+	path = rateatlas-frontend
+	url = https://github.com/CHA0sTIG3R/rateatlas-frontend.git
