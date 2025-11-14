@@ -114,9 +114,9 @@ graph TD
 **Codename:** *BracketForge*
 A Python-based ingestion engine that automatically scrapes, cleans, and normalizes IRS historical tax bracket data.
 
-* Pulls official IRS tables across multiple years
-* Standardizes columns and schema for consistent storage
-* Outputs versioned datasets to AWS S3 for downstream use
+- Pulls official IRS tables across multiple years
+- Standardizes columns and schema for consistent storage
+- Outputs versioned datasets to AWS S3 for downstream use
 
 ---
 
@@ -125,10 +125,10 @@ A Python-based ingestion engine that automatically scrapes, cleans, and normaliz
 **Codename:** *TaxIQ*
 A Spring Boot backend that exposes endpoints for tax calculations, trend analysis, and marginal rate lookups.
 
-* Computes marginal, average, and effective tax rates
-* Integrates with RateAtlas data from BracketForge
-* JSON logging with environment-based log level control
-* Deployed on AWS (ECS or EC2) with CloudWatch integration
+- Computes marginal, average, and effective tax rates
+- Integrates with RateAtlas data from BracketForge
+- JSON logging with environment-based log level control
+- Deployed on AWS (ECS or EC2) with CloudWatch integration
 
 ---
 
@@ -137,9 +137,9 @@ A Spring Boot backend that exposes endpoints for tax calculations, trend analysi
 **Codename:** *TaxLens*
 A modern React + TypeScript + Vite interface for interactive exploration of U.S. tax history.
 
-* Visualizes rate trends and bracket thresholds over time
-* Offers side-by-side year comparisons
-* Built with Tailwind CSS and Recharts for responsive design
+- Visualizes rate trends and bracket thresholds over time
+- Offers side-by-side year comparisons
+- Built with Tailwind CSS and Recharts for responsive design
 
 ---
 
@@ -147,9 +147,9 @@ A modern React + TypeScript + Vite interface for interactive exploration of U.S.
 
 Internal PostgreSQL / S3 storage architecture that supports versioned data retrieval and analysis.
 
-* Central schema for normalized IRS data
-* Supports both local and AWS RDS setups
-* Used by API and analytics scripts for querying and caching
+- Central schema for normalized IRS data
+- Supports both local and AWS RDS setups
+- Used by API and analytics scripts for querying and caching
 
 ---
 
@@ -195,11 +195,11 @@ Keep production secrets in your deployment systems (GitHub Actions secrets, AWS 
 
 ## 🧠 Future Roadmap
 
-* [ ] Add inflation-adjusted rate comparisons
-* [ ] Support state-level tax data
-* [ ] Integrate interactive “what-if” calculators
-* [ ] Enable public API documentation (Swagger / Redoc)
-* [ ] Host frontend at [**ratesatlas.com**](https://ratesatlas.com)
+- [ ] Add inflation-adjusted rate comparisons
+- [ ] Support state-level tax data
+- [ ] Integrate interactive “what-if” calculators
+- [ ] Enable public API documentation (Swagger / Redoc)
+- [ ] Host frontend at [**ratesatlas.com**](https://ratesatlas.com)
 
 ---
 
@@ -237,7 +237,7 @@ It aims to make tax data more transparent, comparable, and visually intuitive fo
 
 ### 🗺️ Ecosystem Layout
 
-```
+```txt
 RateAtlas/
 ├── rateatlas-ingest/        # BracketForge - IRS ingestion pipeline (Python)
 ├── rateatlas-api/           # TaxIQ - Spring Boot backend API
@@ -249,10 +249,10 @@ RateAtlas/
 
 ### 🔗 Links
 
-* **Website:** [https://ratesatlas.com](https://ratesatlas.com)
-* **Docs:** Coming soon (`docs.ratesatlas.com`)
-* **API Demo:** Coming soon (`api.ratesatlas.com`)
-* **Author:** [@CHA0sTIG3R](https://github.com/CHA0sTIG3R)
+- **Website:** [https://ratesatlas.com](https://ratesatlas.com)
+- **Docs:** Coming soon (`docs.ratesatlas.com`)
+- **API Demo:** Coming soon (`api.ratesatlas.com`)
+- **Author:** [@CHA0sTIG3R](https://github.com/CHA0sTIG3R)
 
 ---
 
