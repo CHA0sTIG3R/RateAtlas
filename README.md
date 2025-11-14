@@ -92,9 +92,9 @@ Spin up the full stack locally with the steps below. Each module has deeper inst
 
 ```mermaid
 graph TD
-  A[🏗️ BracketForge<br>(rateatlas-ingest)] -->|Ingested & Normalized Tax Data| B[🧮 TaxIQ<br>(rateatlas-api)]
-  B -->|API Responses & JSON Data| C[📊 TaxLens<br>(rateatlas-frontend)]
-  B --> D[(💾 TaxGrid<br>Database)]
+  A["🏗️ BracketForge<br/>(rateatlas-ingest)"] -->|Ingested & Normalized Tax Data| B["🧮 TaxIQ<br/>(rateatlas-api)"]
+  B -->|API Responses & JSON Data| C["📊 TaxLens<br/>(rateatlas-frontend)"]
+  B --> D["(💾 TaxGrid<br/>Database)"]
   subgraph AWS Cloud
     A
     B
