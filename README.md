@@ -28,63 +28,63 @@ Spin up the full stack locally with the steps below. Each module has deeper inst
 
 1. **Clone the repo**
 
-   ```bash
+```bash
    git clone https://github.com/CHA0sTIG3R/RateAtlas.git
    cd RateAtlas
-   ```
+```
 
-2. **Ingestion (BracketForge) setup**
+1. **Ingestion (BracketForge) setup**
 
-   ```bash
+```bash
    cd rateatlas-ingest
    python3 -m venv .venv && source .venv/bin/activate
    pip install -r requirements-dev.txt
-   ```
+```
 
    Create `.env` with at least:
 
-   ```ini
+```ini
    S3_BUCKET=rateatlas-dev
    S3_KEY=history.csv
    DRY_RUN=1
    ENABLE_BACKEND_PUSH=0
    BACKEND_URL=http://localhost:8080
-   ```
+   DATABASE_URL=postgresql://user:password@host:5432/dbname?sslmode=require
+```
 
-   Then fetch and normalize the latest IRS data (dry-run mode avoids touching AWS):
+   Then run the ingest pipeline (dry-run mode avoids touching AWS or the database):
 
-   ```bash
+```bash
    python -m tax_bracket_ingest.run_ingest
-   ```
+```
 
-3. **API (TaxIQ) with Postgres**
+1. **API (TaxIQ) with Postgres**
 
-   ```bash
+```bash
    cd ../rateatlas-api
    cp .env.example .env.local
    docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
    ./mvnw spring-boot:run
-   ```
+```
 
    Swagger UI will be live at <http://localhost:8080/swagger-ui/index.html>.
-4. **Frontend (TaxLens)**
 
-   ```bash
+1. **Frontend (TaxLens)**
+
+```bash
    cd ../rateatlas-frontend
    npm install
    echo "RATE_ATLAS_API_BASE_URL=http://localhost:8080/api/v1" > .env.local
    npm run dev
-   ```
+```
 
    Vite serves on <http://localhost:5173> and proxies `/api` to the backend automatically (see `vite.config.ts`).
 
 ### Verify Everything
 
-- Run the ingest script again with `DRY_RUN=0` once you connect it to real AWS S3 + backend credentials.
-- Hit `GET /api/v1/tax/years` in Swagger to confirm data landed.
+- Run the ingest script with `DRY_RUN=0` once you connect it to real AWS S3 + backend credentials.
+- Hit `GET /api/v1/tax/brackets/years` in Swagger to confirm data landed.
 - Load the frontend dashboard and run a calculation to confirm API connectivity.
-
----
 
 ---
 
@@ -92,13 +92,27 @@ Spin up the full stack locally with the steps below. Each module has deeper inst
 
 ```mermaid
 graph TD
-  A["🏗️ BracketForge<br/>(rateatlas-ingest)"] -->|Ingested & Normalized Tax Data| B["🧮 TaxIQ<br/>(rateatlas-api)"]
-  B -->|API Responses & JSON Data| C["📊 TaxLens<br/>(rateatlas-frontend)"]
-  B --> D["(💾 TaxGrid<br/>Database)"]
+  A["🏗️ BracketForge<br/>(rateatlas-ingest · AWS Lambda)"]
+  A -->|"1. Probe IRS page date"| IRS["IRS Website"]
+  IRS -->|"2. Page changed → full scrape"| A
+  A -->|"3. Archive versioned CSV"| S3["AWS S3"]
+  A -->|"4. POST /api/v1/tax/upload"| B
+  A -->|"5. Update ingest_metadata"| DB
+
+  B["🧮 TaxIQ<br/>(rateatlas-api · EC2)"]
+  B -->|"Reads/writes"| DB["💾 PostgreSQL (RDS)"]
+  B -->|"Bootstrap from S3 on startup"| S3
+  B -->|"Expose /actuator/prometheus"| Alloy["Grafana Alloy (EC2)"]
+  Alloy -->|"Remote write"| GC["☁️ Grafana Cloud"]
+
+  B -->|"API responses"| C["📊 TaxLens<br/>(rateatlas-frontend)"]
+
   subgraph AWS Cloud
     A
     B
-    D
+    DB
+    S3
+    Alloy
   end
   subgraph Client Side
     C
@@ -112,23 +126,25 @@ graph TD
 ### 🏗️ [**rateatlas-ingest**](./rateatlas-ingest/README.md)
 
 **Codename:** *BracketForge*
-A Python-based ingestion engine that automatically scrapes, cleans, and normalizes IRS historical tax bracket data.
+A Python-based ingestion engine deployed as an AWS Lambda that detects IRS page changes, scrapes, normalizes, and archives tax bracket data.
 
-- Pulls official IRS tables across multiple years
-- Standardizes columns and schema for consistent storage
-- Outputs versioned datasets to AWS S3 for downstream use
+- **Signal-based change detection** — probes the IRS page date before scraping; exits early if nothing has changed
+- Standardizes columns and schema across all four filing statuses for consistent storage
+- Archives versioned datasets to AWS S3 and tracks metadata in Postgres (`ingest_metadata`)
+- Pushes new records directly to TaxIQ via `POST /api/v1/tax/upload`
 
 ---
 
 ### 🧮 [**rateatlas-api**](./rateatlas-api/README.md)
 
 **Codename:** *TaxIQ*
-A Spring Boot backend that exposes endpoints for tax calculations, trend analysis, and marginal rate lookups.
+A Spring Boot backend that exposes endpoints for tax calculations, dataset freshness tracking, and marginal rate lookups.
 
 - Computes marginal, average, and effective tax rates
-- Integrates with RateAtlas data from BracketForge
-- JSON logging with environment-based log level control
-- Deployed on AWS (ECS or EC2) with CloudWatch integration
+- Exposes `GET /api/v1/datasets/latest` with IRS page date, last ingest timestamp, and computed freshness state
+- Bootstraps Postgres from S3 on first startup if no data is present
+- Prometheus metrics scraped by Grafana Alloy and forwarded to Grafana Cloud
+- Deployed on AWS EC2 behind Cloudflare
 
 ---
 
@@ -147,49 +163,52 @@ A modern React + TypeScript + Vite interface for interactive exploration of U.S.
 
 Internal PostgreSQL / S3 storage architecture that supports versioned data retrieval and analysis.
 
-- Central schema for normalized IRS data
+- Central schema for normalized IRS data managed via Flyway migrations
 - Supports both local and AWS RDS setups
-- Used by API and analytics scripts for querying and caching
+- `ingest_metadata` table tracks IRS page update dates, ingest timestamps, and run/skip counts
 
 ---
 
 ## 🔍 Data Flow
 
-1. **BracketForge** (`rateatlas-ingest`) scrapes the IRS HTML tables, normalizes each filing status into a canonical CSV, and (when not in dry-run) appends the new year into the historical `history.csv` stored in S3.
-2. Optional: the same run can push the fresh CSV to **TaxIQ** via `POST /api/v1/tax/upload` when `ENABLE_BACKEND_PUSH=1` and `BACKEND_URL` is configured.
-3. **TaxIQ** (`rateatlas-api`) persists ingested data into Postgres via Spring Data JPA. On startup it can bootstrap from the same S3 history file using the `data-import` profile or the scheduled S3 import.
-4. **TaxLens** (`rateatlas-frontend`) calls the API for `/tax/history`, `/tax/breakdown`, and related endpoints to render charts, calculators, and comparisons in the browser.
+1. **BracketForge** (`rateatlas-ingest`) runs on a weekly schedule via AWS EventBridge. It first probes the IRS page for its "Last Updated" date and compares it against the last seen date stored in Postgres. If the page hasn't changed, the Lambda exits early — no scraping, no S3 writes, no backend push.
+2. When the IRS page has changed, BracketForge fetches and parses the full HTML, normalizes each filing status into a canonical CSV, and archives the updated data to S3.
+3. BracketForge then pushes the fresh data to **TaxIQ** via `POST /api/v1/tax/upload` and updates `ingest_metadata` with the new page date and ingest timestamp.
+4. **TaxIQ** (`rateatlas-api`) persists the ingested data into Postgres via Spring Data JPA. On first startup with an empty database, it bootstraps from the same S3 history file automatically.
+5. **TaxLens** (`rateatlas-frontend`) calls the API for bracket, calculation, and history endpoints to render charts, calculators, and comparisons in the browser.
 
-This flow keeps S3 as the “source of truth” archive, the API/DB as the serving layer, and the frontend as the visualization surface.
+S3 serves as the immutable historical archive, Postgres as the serving layer, and the frontend as the visualization surface.
 
 ---
 
 ## ⚙️ Configuration Reference
 
-| Component | Key Variables | Purpose / Notes | Defined In |
-| --------- | ------------- | --------------- | ---------- |
-| Ingestion (`rateatlas-ingest`) | `S3_BUCKET`, `S3_KEY` | Location of `history.csv` in S3; required even for dry-run | `.env`, `tax_bracket_ingest/run_ingest.py` |
-|  | `DRY_RUN`, `ENABLE_BACKEND_PUSH` | Toggle writes to S3/backends | `.env` |
-|  | `BACKEND_URL`, `INGEST_API_KEY` | Optional push to `POST /api/v1/tax/upload` | `.env` |
-|  | `AWS_REGION`, AWS credentials | Needed when accessing S3 without instance roles/OIDC | `.env` |
-| API (`rateatlas-api`) | `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` | Database connection overrides | `.env.local`, `application.properties` |
-|  | `APP_INGEST_API_KEY` | Protects ingest endpoint | `.env.local` |
-|  | `TAX_S3_BUCKET`, `TAX_S3_KEY`, `TAX_S3_IMPORT_ENABLED`, `TAX_S3_IMPORT_CRON` | Controls scheduled S3 sync | `.env.local`, `application.properties` |
-| Frontend (`rateatlas-frontend`) | `RATE_ATLAS_API_BASE_URL` or `VITE_API_BASE_URL` | Base URL for Axios client (see `src/api.ts`) | `.env.local`, `vite.config.ts` |
-| Shared | `AWS_REGION` | Used by both Python ingestion and Java API when touching AWS | respective `.env` files |
+| Component                       | Key Variables                                                                       | Purpose / Notes                                      |
+| ------------------------------- | ----------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| Ingestion (`rateatlas-ingest`)  | `S3_BUCKET`, `S3_KEY`                                                               | Location of `history.csv` in S3                      |
+|                                 | `DRY_RUN`, `ENABLE_BACKEND_PUSH`                                                    | Toggle writes to S3/backend                          |
+|                                 | `BACKEND_URL`, `INGEST_API_KEY`                                                     | Push target and auth for `POST /api/v1/tax/upload`   |
+|                                 | `DATABASE_URL`                                                                      | Postgres connection for `ingest_metadata` read/write |
+|                                 | `AWS_REGION`, AWS credentials                                                       | Needed when not using instance roles/OIDC            |
+| API (`rateatlas-api`)           | `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` | Database connection                                  |
+|                                 | `INGEST_API_KEY`                                                                    | Authenticates ingest pushes from BracketForge        |
+|                                 | `S3_BUCKET`, `S3_KEY`                                                               | S3 source for startup bootstrap                      |
+|                                 | `PROMETHEUS_SCRAPE_USERNAME`, `PROMETHEUS_SCRAPE_PASSWORD`                          | Basic auth protecting `/actuator/prometheus`         |
+| Frontend (`rateatlas-frontend`) | `RATE_ATLAS_API_BASE_URL` or `VITE_API_BASE_URL`                                    | Base URL for API client                              |
+| Shared                          | `AWS_REGION`                                                                        | Used by both ingest and API when touching AWS        |
 
-Keep production secrets in your deployment systems (GitHub Actions secrets, AWS Parameter Store, etc.) and never commit `.env` files.
+Keep production secrets in your deployment systems (GitHub Actions secrets, AWS SSM Parameter Store, etc.) and never commit `.env` files.
 
 ---
 
 ## ☁️ Deployment & Infrastructure
 
-| Environment     | Description                                            |
-| --------------- | ------------------------------------------------------ |
-| **Development** | Docker Compose setup for local ingestion + API testing |
-| **Production**  | AWS-based stack (ECR, ECS, Lambda, RDS, CloudWatch)    |
-| **CI/CD**       | GitHub Actions for build, test, and deploy pipelines   |
-| **Logging**     | ECS-formatted JSON logs with dynamic log levels        |
+| Environment       | Description                                                         |
+| ----------------- | ------------------------------------------------------------------- |
+| **Development**   | Docker Compose setup for local ingestion + API testing              |
+| **Production**    | AWS EC2 (API), Lambda (ingest), RDS (Postgres), S3, ECR, Cloudflare |
+| **CI/CD**         | GitHub Actions with OIDC for build, test, and deploy pipelines      |
+| **Observability** | Prometheus metrics → Grafana Alloy → Grafana Cloud                  |
 
 ---
 
@@ -197,18 +216,21 @@ Keep production secrets in your deployment systems (GitHub Actions secrets, AWS 
 
 - [ ] Add inflation-adjusted rate comparisons
 - [ ] Support state-level tax data
-- [ ] Integrate interactive “what-if” calculators
-- [ ] Enable public API documentation (Swagger / Redoc)
-- [ ] Host frontend at [**ratesatlas.com**](https://ratesatlas.com)
+- [ ] Integrate interactive "what-if" calculators
+- [x] ~~Enable public API documentation (Swagger / Redoc)~~ — live at [api.ratesatlas.com/swagger-ui/index.html](https://api.ratesatlas.com/swagger-ui/index.html)
+- [x] Host frontend at [**ratesatlas.com**](https://ratesatlas.com)
+- [ ] Redis caching layer
+- [ ] Rate limiting / throttling
+- [ ] NPM widget package `@rateatlas/tax-estimator`
 
 ---
 
 ## 🧾 Example Use Case
 
-> “How has the top marginal tax rate changed from 1980 to 2025?”
+> "How has the top marginal tax rate changed from 1980 to 2025?"
 
-1. **BracketForge** ingests IRS source data for both years.
-2. **TaxIQ** computes the marginal rate differences.
+1. **BracketForge** detects the IRS page has updated and ingests the latest data.
+2. **TaxIQ** computes the marginal rate differences across years.
 3. **TaxLens** visualizes the comparison graphically.
 
 Result: users get a historical perspective and effective tax visualization in seconds.
@@ -217,42 +239,15 @@ Result: users get a historical perspective and effective tax visualization in se
 
 ## 🧰 Tech Stack Summary
 
-| Layer      | Technology                                         |
-| ---------- | -------------------------------------------------- |
-| Ingestion  | Python 3.11, Pandas, AWS SDK (Boto3), Pytest       |
-| API        | Java 17, Spring Boot 3, Maven, ECS logging         |
-| Frontend   | React 18, TypeScript, Vite, Tailwind CSS, Recharts |
-| Infra      | AWS ECR / ECS / Lambda / S3 / CloudWatch / RDS     |
-| Testing    | Pytest, JUnit, GitHub Actions CI                   |
-| Deployment | Docker multi-stage builds, AWS ECR images          |
-
----
-
-## 💡 About
-
-**RateAtlas** was created by [Hamzat Olowu](https://github.com/CHA0sTIG3R) as a full-stack data platform exploring the evolution of U.S. marginal tax rates.
-It aims to make tax data more transparent, comparable, and visually intuitive for developers, analysts, and policymakers.
-
----
-
-### 🗺️ Ecosystem Layout
-
-```txt
-RateAtlas/
-├── rateatlas-ingest/        # BracketForge - IRS ingestion pipeline (Python)
-├── rateatlas-api/           # TaxIQ - Spring Boot backend API
-├── rateatlas-frontend/      # TaxLens - React frontend
-└── README.md                # Umbrella documentation
-```
-
----
-
-### 🔗 Links
-
-- **Website:** [https://ratesatlas.com](https://ratesatlas.com)
-- **Docs:** Coming soon (`docs.ratesatlas.com`)
-- **API Demo:** Coming soon (`api.ratesatlas.com`)
-- **Author:** [@CHA0sTIG3R](https://github.com/CHA0sTIG3R)
+| Layer      | Technology                                                           |
+| ---------- | -------------------------------------------------------------------- |
+| Ingestion  | Python 3.11, Pandas, AWS SDK (Boto3), Psycopg, Pytest                |
+| API        | Java 17, Spring Boot 3, Maven, Spring Security, Micrometer/Prometheus|
+| Frontend   | React 18, TypeScript, Vite, Tailwind CSS, Recharts                   |
+| Infra      | AWS EC2 / Lambda / S3 / ECR / RDS · Cloudflare                       |
+| Observability | Prometheus, Grafana Alloy, Grafana Cloud                          |
+| Testing    | Pytest, JUnit 5, Testcontainers, GitHub Actions CI                   |
+| Deployment | Docker multi-stage builds, AWS ECR images, GitHub Actions OIDC       |
 
 ---
 
@@ -260,30 +255,51 @@ RateAtlas/
 
 | Layer | Local Command | Notes |
 | ----- | ------------- | ----- |
-| Ingestion | `pytest` (or `pytest -m "not integration"` / `pytest -m integration`) | Requires Python venv, hits live network for integration tests |
+| Ingestion | `pytest` (or `pytest -m "not integration"` / `pytest -m integration`) | Requires Python venv |
 | API | `./mvnw test` | Spins up Testcontainers Postgres; ensure Docker is running |
 | Frontend | `npm run lint` / `npm run build` | Uses Vite + ESLint |
 
-GitHub Actions pipelines (see each repo directory) run these commands on push, enforce coverage (ingestion), build container images (API), and will later orchestrate frontend deploys. Align local checks with CI for smoother PRs.
+GitHub Actions pipelines run on every push, enforce coverage (ingestion), build container images (API), and deploy to AWS on merges to `main`. Use `[skip ci]` in your commit message to bypass pipelines for documentation-only changes.
 
 ---
 
 ## 🛠 Operations & Monitoring
 
-- **Scheduling ingestion:** Use cron for self-hosted runs or AWS EventBridge / Lambda when inside AWS (see `rateatlas-ingest/README.md` for templates). Ensure `DRY_RUN=0` and valid AWS credentials when running for real.
-- **API health:** Spring Boot Actuator exposes `/actuator/health`, `/metrics`, and `/info`; Swagger UI lives at `/swagger-ui/index.html` for manual endpoint checks.
-- **Logging:** Ingestion logs to stdout/file path defined in `.env`; API logs JSON with correlation IDs suitable for CloudWatch (`logging.pattern.level` in `application.properties`); frontend uses Vite console logging during dev.
-- **Deployment targets:** Production runs on AWS (ECR, ECS or Lambda, RDS, CloudWatch). Local Docker Compose (`rateatlas-api/docker-compose.local.yml`) mirrors that stack with Postgres and the API container.
+- **Scheduling ingestion:** BracketForge runs weekly via AWS EventBridge (every Friday at 12:00 UTC). The signal-based gate ensures no work is done unless the IRS page has actually changed.
+- **API health:** Spring Boot Actuator exposes `/actuator/health` and `/actuator/info`. Swagger UI at `/swagger-ui/index.html` for manual endpoint checks.
+- **Metrics & observability:** `/actuator/prometheus` (basic auth required) is scraped by Grafana Alloy on EC2 and forwarded to Grafana Cloud. The live dashboard tracks API uptime, p95 request latency, data freshness, and calculation throughput.
+- **Logging:** Ingestion logs to stdout/file path defined in `.env`; API logs structured JSON.
+- **Deployment:** Production runs on AWS (EC2, Lambda, RDS, S3, ECR) behind Cloudflare. Local Docker Compose (`rateatlas-api/docker-compose.local.yml`) mirrors the stack with Postgres and the API container.
 
 ---
 
 ## 📄 Licensing
 
 - **rateatlas-api:** Apache License 2.0 (`rateatlas-api/LICENSE`)
-- **rateatlas-ingest & rateatlas-frontend:** License to be finalized (currently unlicensed placeholders in their READMEs)
+- **rateatlas-ingest & rateatlas-frontend:** License to be finalized (currently unlicensed)
 
 Until a unified license is published at the repo root, treat each module individually and avoid redistributing unlicensed components.
 
 ---
 
-> *“Mapping how rates change — because understanding the past helps design a smarter tax future.”*
+## 🗺️ Ecosystem Layout
+
+```txt
+RateAtlas/
+├── rateatlas-ingest/        # BracketForge - IRS ingestion pipeline (Python · Lambda)
+├── rateatlas-api/           # TaxIQ - Spring Boot backend API (EC2)
+├── rateatlas-frontend/      # TaxLens - React frontend
+└── README.md                # Umbrella documentation
+```
+
+---
+
+## 🔗 Links
+
+- **Website:** [https://ratesatlas.com](https://ratesatlas.com)
+- **Live API:** [https://api.ratesatlas.com/swagger-ui/index.html](https://api.ratesatlas.com/swagger-ui/index.html)
+- **Author:** [@CHA0sTIG3R](https://github.com/CHA0sTIG3R)
+
+---
+
+> *"Mapping how rates change — because understanding the past helps design a smarter tax future."*
