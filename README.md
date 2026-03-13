@@ -83,7 +83,7 @@ Spin up the full stack locally with the steps below. Each module has deeper inst
 ### Verify Everything
 
 - Run the ingest script with `DRY_RUN=0` once you connect it to real AWS S3 + backend credentials.
-- Hit `GET /api/v1/tax/brackets/years` in Swagger to confirm data landed.
+- Hit `GET /api/v1/tax/years` in Swagger to confirm data landed.
 - Load the frontend dashboard and run a calculation to confirm API connectivity.
 
 ---
@@ -142,6 +142,10 @@ A Spring Boot backend that exposes endpoints for tax calculations, dataset fresh
 
 - Computes marginal, average, and effective tax rates
 - Exposes `GET /api/v1/datasets/latest` with IRS page date, last ingest timestamp, and computed freshness state
+- Redis caching on bracket lookups, calculations, and no-tax year checks — sub-100ms response times on cache hits
+- Rate limiting via Bucket4j token bucket (100 req/min per IP or API key)
+- Resilience4j circuit breakers on all DB-hitting methods with cache-first fallback
+- Distributed tracing via OTel Java agent exporting to Grafana Cloud Tempo
 - Bootstraps Postgres from S3 on first startup if no data is present
 - Prometheus metrics scraped by Grafana Alloy and forwarded to Grafana Cloud
 - Deployed on AWS EC2 behind Cloudflare
@@ -191,9 +195,11 @@ S3 serves as the immutable historical archive, Postgres as the serving layer, an
 |                                 | `DATABASE_URL`                                                                      | Postgres connection for `ingest_metadata` read/write |
 |                                 | `AWS_REGION`, AWS credentials                                                       | Needed when not using instance roles/OIDC            |
 | API (`rateatlas-api`)           | `SPRING_DATASOURCE_URL`, `SPRING_DATASOURCE_USERNAME`, `SPRING_DATASOURCE_PASSWORD` | Database connection                                  |
-|                                 | `INGEST_API_KEY`                                                                    | Authenticates ingest pushes from BracketForge        |
+|                                 | `APP_INGEST_API_KEY`                                                                | Authenticates ingest pushes from BracketForge        |
 |                                 | `S3_BUCKET`, `S3_KEY`                                                               | S3 source for startup bootstrap                      |
+|                                 | `REDIS_URL`                                                                         | Redis Cloud connection string                        |
 |                                 | `PROMETHEUS_SCRAPE_USERNAME`, `PROMETHEUS_SCRAPE_PASSWORD`                          | Basic auth protecting `/actuator/prometheus`         |
+|                                 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`                         | OTel trace export to Grafana Cloud Tempo             |
 | Frontend (`rateatlas-frontend`) | `RATE_ATLAS_API_BASE_URL` or `VITE_API_BASE_URL`                                    | Base URL for API client                              |
 | Shared                          | `AWS_REGION`                                                                        | Used by both ingest and API when touching AWS        |
 
@@ -218,9 +224,9 @@ Keep production secrets in your deployment systems (GitHub Actions secrets, AWS 
 - [ ] Support state-level tax data
 - [ ] Integrate interactive "what-if" calculators
 - [x] ~~Enable public API documentation (Swagger / Redoc)~~ — live at [api.ratesatlas.com/swagger-ui/index.html](https://api.ratesatlas.com/swagger-ui/index.html)
-- [x] Host frontend at [**ratesatlas.com**](https://ratesatlas.com)
-- [ ] Redis caching layer
-- [ ] Rate limiting / throttling
+- [x] ~~Host frontend at ratesatlas.com~~
+- [x] ~~Redis caching layer~~ — bracket lookups, calculations, no-tax year checks
+- [x] ~~Rate limiting / throttling~~ — 100 req/min per IP or API key via Bucket4j
 - [ ] NPM widget package `@rateatlas/tax-estimator`
 
 ---
@@ -239,15 +245,15 @@ Result: users get a historical perspective and effective tax visualization in se
 
 ## 🧰 Tech Stack Summary
 
-| Layer      | Technology                                                           |
-| ---------- | -------------------------------------------------------------------- |
-| Ingestion  | Python 3.11, Pandas, AWS SDK (Boto3), Psycopg, Pytest                |
-| API        | Java 17, Spring Boot 3, Maven, Spring Security, Micrometer/Prometheus|
-| Frontend   | React 18, TypeScript, Vite, Tailwind CSS, Recharts                   |
-| Infra      | AWS EC2 / Lambda / S3 / ECR / RDS · Cloudflare                       |
-| Observability | Prometheus, Grafana Alloy, Grafana Cloud                          |
-| Testing    | Pytest, JUnit 5, Testcontainers, GitHub Actions CI                   |
-| Deployment | Docker multi-stage builds, AWS ECR images, GitHub Actions OIDC       |
+| Layer         | Technology                                                                                    |
+| ------------- | --------------------------------------------------------------------------------------------- |
+| Ingestion     | Python 3.11, Pandas, AWS SDK (Boto3), Psycopg, Pytest                                         |
+| API           | Java 17, Spring Boot 3, Maven, Spring Security, Micrometer/Prometheus, Resilience4j, Bucket4j |
+| Frontend      | React 18, TypeScript, Vite, Tailwind CSS, Recharts                                            |
+| Infra         | AWS EC2 / Lambda / S3 / ECR / RDS · Cloudflare                                                |
+| Observability | Prometheus, Grafana Alloy, Grafana Cloud, OpenTelemetry, Grafana Tempo                        |
+| Testing       | Pytest, JUnit 5, Testcontainers, GitHub Actions CI                                            |
+| Deployment    | Docker multi-stage builds, AWS ECR images, GitHub Actions OIDC                                |
 
 ---
 
@@ -267,7 +273,7 @@ GitHub Actions pipelines run on every push, enforce coverage (ingestion), build 
 
 - **Scheduling ingestion:** BracketForge runs weekly via AWS EventBridge (every Friday at 12:00 UTC). The signal-based gate ensures no work is done unless the IRS page has actually changed.
 - **API health:** Spring Boot Actuator exposes `/actuator/health` and `/actuator/info`. Swagger UI at `/swagger-ui/index.html` for manual endpoint checks.
-- **Metrics & observability:** `/actuator/prometheus` (basic auth required) is scraped by Grafana Alloy on EC2 and forwarded to Grafana Cloud. The live dashboard tracks API uptime, p95 request latency, data freshness, and calculation throughput.
+- **Metrics & observability:** `/actuator/prometheus` (basic auth required) is scraped by Grafana Alloy on EC2 and forwarded to Grafana Cloud. The live dashboard tracks API uptime, p95 request latency, data freshness, and calculation throughput. Distributed traces are exported to Grafana Cloud Tempo via the OTel Java agent and utilizing Grafana Explore to correlate latency spikes with specific business operations.
 - **Logging:** Ingestion logs to stdout/file path defined in `.env`; API logs structured JSON.
 - **Deployment:** Production runs on AWS (EC2, Lambda, RDS, S3, ECR) behind Cloudflare. Local Docker Compose (`rateatlas-api/docker-compose.local.yml`) mirrors the stack with Postgres and the API container.
 
